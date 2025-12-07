@@ -1,0 +1,1745 @@
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>円柱周りの流れシミュレーション（ADI法）</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        p {
+            color: #666;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+        }
+        label {
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input, select, button {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            min-width: 100px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #reset-btn {
+            background-color: #f44336;
+        }
+        #reset-btn:hover {
+            background-color: #d32f2f;
+        }
+        canvas {
+            display: block;
+            margin: 0 auto;
+            background-color: #333;
+            border-radius: 4px;
+        }
+        .legend {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-top: 10px;
+            gap: 10px;
+        }
+        .legend-canvas {
+            border: 1px solid #ddd;
+        }
+        .status {
+            text-align: center;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .stable {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .warning {
+            background-color: #fcf8e3;
+            color: #8a6d3b;
+        }
+        .error {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+        .solver-info {
+            text-align: center;
+            padding: 10px;
+            margin-bottom: 10px;
+            background-color: #d9edf7;
+            color: #31708f;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>円柱周りの流れシミュレーション（ADI法）</h1>
+        <p>流れ関数-渦度法による円柱周りの流れの数値計算（極座標系メッシュ、ADI法）</p>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="reynolds">レイノルズ数:</label>
+                <input type="number" id="reynolds" min="1" max="1000" value="40">
+            </div>
+            <div class="control-group">
+                <label for="dt">時間ステップ幅 [s]:</label>
+                <input type="number" id="dt" min="0.001" max="0.1" step="0.001" value="0.005">
+            </div>
+            <div class="control-group">
+                <label for="display-mode">表示モード:</label>
+                <select id="display-mode">
+                    <option value="streamlines">流線</option>
+                    <option value="vorticity">渦度</option>
+                    <option value="velocity">速度場</option>
+                    <option value="pressure">圧力場</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="solver-method">解法:</label>
+                <select id="solver-method">
+                    <option value="adi">ADI法</option>
+                    <option value="explicit">陽解法</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <button id="start-btn">開始</button>
+            </div>
+            <div class="control-group">
+                <button id="reset-btn">リセット</button>
+            </div>
+        </div>
+
+        <div id="status-message" class="status stable">シミュレーション準備完了</div>
+        <div id="solver-info" class="solver-info">ADI法: より大きな時間ステップでも安定した解が得られます</div>
+
+        <canvas id="simulation-canvas" width="800" height="400"></canvas>
+
+        <div class="legend">
+            <canvas id="legend-canvas" width="300" height="30" class="legend-canvas"></canvas>
+            <span id="legend-label">カラーマップ</span>
+        </div>
+
+        <div>
+            <p>時間: <span id="time-display">0.00</span> s</p>
+            <p>ステップ数: <span id="step-display">0</span></p>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * シミュレーションクラス
+         * 円柱周りの流れの計算と表示を管理
+         */
+        class CylinderFlowSimulation {
+            constructor() {
+                // 定数の定義
+                this.CONSTANTS = {
+                    TANH_STRETCH_FACTOR: 3,      // 双曲正接関数のストレッチ係数
+                    STREAMLINE_COUNT: 20,        // 流線の数
+                    ARROW_LENGTH_SCALE: 10,      // 速度ベクトルの長さスケール
+                    ARROW_SIZE: 3,               // 矢印の先端のサイズ
+                    AXIS_LABEL_FONT: '14px Arial', // 軸ラベルのフォント
+                    VECTOR_SKIP_FACTOR: 20,      // 速度ベクトル表示の間引き率
+                    MAX_SOR_ITER: 100,           // SOR法の最大反復回数
+                    SOR_OMEGA: 1.5,              // SOR法の緩和係数
+                    SOR_EPSILON: 1e-4,           // SOR法の収束判定基準
+                    MIN_DISPLAY_RANGE: 0.01,     // 表示範囲の最小値（ゼロ除算防止）
+                    MAX_TRIDIAGONAL_ITER: 1000   // 三重対角行列ソルバーの最大反復回数
+                };
+
+                // シミュレーションパラメータ
+                this.params = {
+                    nr: 60,          // 径方向分割数
+                    ntheta: 120,     // 周方向分割数（πまで）
+                    rMin: 0.5,       // 円柱半径 [m]
+                    rMax: 10.0,      // 計算領域外径 [m]
+                    U0: 1.0,         // 一様流速度 [m/s]
+                    Re: 40,          // レイノルズ数
+                    dt: 0.005,       // 時間刻み [s]
+                    running: false,  // シミュレーション実行中フラグ
+                    time: 0,         // 経過時間 [s]
+                    steps: 0,        // 計算ステップ数
+                    displayMode: 'streamlines', // 表示モード
+                    solverMethod: 'adi', // 解法（'adi'または'explicit'）
+                    lastFrameTime: 0 // 前回のフレーム時間（FPS制御用）
+                };
+
+                // UI要素の取得
+                this.initializeUIElements();
+
+                // グリッドと物理量の初期化
+                this.initializeArrays();
+
+                // イベントリスナーの設定
+                this.setupEventListeners();
+
+                // シミュレーションの初期化
+                this.initializeSimulation();
+
+                // アニメーションループの開始
+                requestAnimationFrame(this.animate.bind(this));
+            }
+
+            /**
+             * 配列の初期化
+             */
+            initializeArrays() {
+                this.r = new Array(this.params.nr);
+                this.theta = new Array(this.params.ntheta);
+                this.psi = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+                this.omega = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+                this.omega_old = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+                this.omega_half = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+                this.u = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+                this.v = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+                this.p = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+                this.velocityMagnitude = new Array(this.params.nr).fill().map(() => new Array(this.params.ntheta).fill(0));
+
+                // 表示用の最小・最大値 - nullに初期化して最初のステップで強制的に計算させる
+                this.displayRanges = {
+                    psi: { min: null, max: null },
+                    omega: { min: null, max: null },
+                    velocity: { min: null, max: null },
+                    pressure: { min: null, max: null }
+                };
+            }
+
+            /**
+             * UI要素の初期化
+             */
+            initializeUIElements() {
+                this.canvas = document.getElementById('simulation-canvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.legendCanvas = document.getElementById('legend-canvas');
+                this.legendCtx = this.legendCanvas.getContext('2d');
+                this.reynoldsInput = document.getElementById('reynolds');
+                this.dtInput = document.getElementById('dt');
+                this.displayModeSelect = document.getElementById('display-mode');
+                this.solverMethodSelect = document.getElementById('solver-method');
+                this.startBtn = document.getElementById('start-btn');
+                this.resetBtn = document.getElementById('reset-btn');
+                this.timeDisplay = document.getElementById('time-display');
+                this.stepDisplay = document.getElementById('step-display');
+                this.legendLabel = document.getElementById('legend-label');
+                this.statusMessage = document.getElementById('status-message');
+                this.solverInfo = document.getElementById('solver-info');
+            }
+
+            /**
+             * イベントリスナーの設定
+             */
+            setupEventListeners() {
+                // 正しいthisのバインディングを確保するためにbindを使用
+                this.startBtn.addEventListener('click', this.toggleSimulation.bind(this));
+                this.resetBtn.addEventListener('click', this.resetSimulation.bind(this));
+                this.reynoldsInput.addEventListener('change', this.onReynoldsChange.bind(this));
+                this.dtInput.addEventListener('change', this.onDtChange.bind(this));
+                this.displayModeSelect.addEventListener('change', this.onDisplayModeChange.bind(this));
+                this.solverMethodSelect.addEventListener('change', this.onSolverMethodChange.bind(this));
+            }
+
+            /**
+             * シミュレーションの開始/停止を切り替え
+             */
+            toggleSimulation() {
+                this.params.running = !this.params.running;
+                this.startBtn.textContent = this.params.running ? '一時停止' : '開始';
+
+                // デバッグ用
+                console.log(`シミュレーション状態: ${this.params.running ? '実行中' : '停止'}`);
+            }
+
+            /**
+             * シミュレーションのリセット
+             */
+            resetSimulation() {
+                this.params.running = false;
+                this.startBtn.textContent = '開始';
+                this.initializeSimulation();
+
+                // デバッグ用
+                console.log('シミュレーションをリセットしました');
+            }
+
+            /**
+             * レイノルズ数変更時の処理
+             */
+            onReynoldsChange() {
+                this.params.Re = parseInt(this.reynoldsInput.value);
+                this.checkStability();
+
+                // デバッグ用
+                console.log(`レイノルズ数を ${this.params.Re} に変更しました`);
+            }
+
+            /**
+             * 時間ステップ幅変更時の処理
+             */
+            onDtChange() {
+                this.params.dt = parseFloat(this.dtInput.value);
+                this.checkStability();
+
+                // デバッグ用
+                console.log(`時間ステップ幅を ${this.params.dt} に変更しました`);
+            }
+
+            /**
+             * 表示モード変更時の処理
+             */
+            onDisplayModeChange() {
+                this.params.displayMode = this.displayModeSelect.value;
+                this.updateDisplay();
+
+                // デバッグ用
+                console.log(`表示モードを ${this.params.displayMode} に変更しました`);
+            }
+
+            /**
+             * 解法変更時の処理
+             */
+            onSolverMethodChange() {
+                this.params.solverMethod = this.solverMethodSelect.value;
+
+                // 解法に応じた説明を表示
+                if (this.params.solverMethod === 'adi') {
+                    this.solverInfo.textContent = 'ADI法: より大きな時間ステップでも安定した解が得られます';
+                } else {
+                    this.solverInfo.textContent = '陽解法: 計算は速いですが、時間ステップを小さくする必要があります';
+                }
+
+                this.checkStability();
+
+                // デバッグ用
+                console.log(`解法を ${this.params.solverMethod} に変更しました`);
+            }
+
+            /**
+             * 数値安定性のチェック
+             */
+            checkStability() {
+                const nu = this.params.U0 * 2 * this.params.rMin / this.params.Re;
+                const dr_min = (this.r[1] - this.r[0]);
+                const dtheta_min = (this.theta[1] - this.theta[0]);
+                const r_min = this.r[0];
+
+                // 拡散項の安定条件
+                const diffusion_dt_limit = 0.5 * Math.min(
+                    dr_min * dr_min / nu,
+                    r_min * r_min * dtheta_min * dtheta_min / nu
+                );
+
+                // 移流項の安定条件（CFL条件）
+                const advection_dt_limit = 0.5 * Math.min(
+                    dr_min / this.params.U0,
+                    r_min * dtheta_min / this.params.U0
+                );
+
+                const dt_limit = Math.min(diffusion_dt_limit, advection_dt_limit);
+
+                // ADI法の場合は安定性条件が緩和される
+                const method_factor = this.params.solverMethod === 'adi' ? 5.0 : 1.0;
+                const adjusted_dt_limit = dt_limit * method_factor;
+
+                if (this.params.dt > adjusted_dt_limit) {
+                    this.setStatus('warning', `警告: 時間ステップが大きすぎます。推奨値: ${adjusted_dt_limit.toExponential(2)} s以下`);
+                } else {
+                    this.setStatus('stable', 'シミュレーション安定条件を満たしています');
+                }
+            }
+
+            /**
+             * ステータスメッセージの設定
+             * @param {string} type - ステータスタイプ ('stable', 'warning', 'error')
+             * @param {string} message - 表示するメッセージ
+             */
+            setStatus(type, message) {
+                this.statusMessage.className = `status ${type}`;
+                this.statusMessage.textContent = message;
+            }
+
+            /**
+             * グリッドの生成（不等間隔）
+             */
+            initializeGrid() {
+                // 径方向のグリッド（円柱近傍で細かく）
+                for (let i = 0; i < this.params.nr; i++) {
+                    const s = i / (this.params.nr - 1);
+                    // 双曲正接関数を使って円柱近傍でメッシュを細かくする
+                    this.r[i] = this.params.rMin + (this.params.rMax - this.params.rMin) * 
+                        (Math.tanh(this.CONSTANTS.TANH_STRETCH_FACTOR * s) / 
+                         Math.tanh(this.CONSTANTS.TANH_STRETCH_FACTOR));
+                }
+
+                // 角度方向のグリッド（0からπまで）
+                for (let j = 0; j < this.params.ntheta; j++) {
+                    this.theta[j] = Math.PI * j / (this.params.ntheta - 1);
+                }
+            }
+
+            /**
+             * 初期条件の設定
+             */
+            setInitialConditions() {
+                // 流れ関数の初期値（一様流）
+                for (let i = 0; i < this.params.nr; i++) {
+                    for (let j = 0; j < this.params.ntheta; j++) {
+                        // 一様流の流れ関数: ψ = U₀ * r * sin(θ)
+                        this.psi[i][j] = this.params.U0 * this.r[i] * Math.sin(this.theta[j]);
+
+                        // 渦度の初期値は0
+                        this.omega[i][j] = 0;
+                        this.omega_old[i][j] = 0;
+                        this.omega_half[i][j] = 0;
+
+                        // 速度場の初期化
+                        this.u[i][j] = this.params.U0 * Math.cos(this.theta[j]);
+                        this.v[i][j] = -this.params.U0 * Math.sin(this.theta[j]);
+
+                        // 圧力場の初期化
+                        this.p[i][j] = 0;
+                    }
+                }
+
+                // 境界条件の適用
+                this.applyBoundaryConditions();
+
+                // 表示範囲の初期化 - 強制的に計算するためにnullに設定
+                this.displayRanges = {
+                    psi: { min: null, max: null },
+                    omega: { min: null, max: null },
+                    velocity: { min: null, max: null },
+                    pressure: { min: null, max: null }
+                };
+
+                // 表示範囲の更新
+                this.updateDisplayRanges();
+            }
+
+            /**
+             * 境界条件の設定（統合版）
+             */
+            applyBoundaryConditions() {
+                // 流れ関数と渦度の境界条件
+                this.applyStreamFunctionBoundaryConditions();
+                this.applyVorticityBoundaryConditions();
+                this.applyVelocityBoundaryConditions();
+                this.applyPressureBoundaryConditions();
+            }
+
+            /**
+             * 流れ関数の境界条件
+             */
+            applyStreamFunctionBoundaryConditions() {
+                // 円柱表面（i=0）での境界条件
+                for (let j = 0; j < this.params.ntheta; j++) {
+                    // 流れ関数は円柱表面で一定（ψ=0）
+                    this.psi[0][j] = 0;
+                }
+
+                // 外側境界（i=nr-1）での境界条件
+                for (let j = 0; j < this.params.ntheta; j++) {
+                    // 一様流の流れ関数
+                    this.psi[this.params.nr-1][j] = this.params.U0 * this.r[this.params.nr-1] * Math.sin(this.theta[j]);
+                }
+
+                // 対称軸（θ=0）での境界条件
+                for (let i = 0; i < this.params.nr; i++) {
+                    // θ=0での境界条件（流れ関数=0）
+                    this.psi[i][0] = 0;
+                }
+
+                // θ=πでの境界条件
+                for (let i = 0; i < this.params.nr; i++) {
+                    // θ=πでの境界条件（流れ関数は一様流）
+                    const j = this.params.ntheta - 1;
+                    this.psi[i][j] = 0;
+                }
+            }
+
+            /**
+             * 渦度の境界条件
+             */
+            applyVorticityBoundaryConditions() {
+                // 円柱表面（i=0）での境界条件
+                for (let j = 0; j < this.params.ntheta; j++) {
+                    // 渦度は境界で計算（壁面での渦度生成）
+                    // 2次精度の片側差分を使用
+                    const dr1 = this.r[1] - this.r[0];
+                    const dr2 = this.r[2] - this.r[1];
+
+                    // テイラー展開を用いた2次精度の境界渦度計算
+                    this.omega[0][j] = (
+                        -(8 * this.psi[1][j] - this.psi[2][j]) / (2 * dr1 * (dr1 + dr2))
+                    );
+                }
+
+                // 外側境界（i=nr-1）での境界条件
+                for (let j = 0; j < this.params.ntheta; j++) {
+                    // 渦度は0（十分遠方では一様流）
+                    this.omega[this.params.nr-1][j] = 0;
+                }
+
+                // 対称軸（θ=0）での境界条件
+                for (let i = 0; i < this.params.nr; i++) {
+                    // θ=0での渦度は対称条件
+                    this.omega[i][0] = 0;
+                }
+
+                // θ=πでの境界条件
+                for (let i = 0; i < this.params.nr; i++) {
+                    // θ=πでの渦度は対称条件 - 法線方向の勾配がゼロ
+                    const j = this.params.ntheta - 1;
+                    this.omega[i][j] = this.omega[i][0];
+                }
+
+                // ADI法の中間ステップの境界条件も適用
+                if (this.params.solverMethod === 'adi') {
+                    // 円柱表面（i=0）
+                    for (let j = 0; j < this.params.ntheta; j++) {
+                        this.omega_half[0][j] = this.omega[0][j];
+                    }
+
+                    // 外側境界（i=nr-1）
+                    for (let j = 0; j < this.params.ntheta; j++) {
+                        this.omega_half[this.params.nr-1][j] = 0;
+                    }
+
+                    // 対称軸（θ=0）
+                    for (let i = 0; i < this.params.nr; i++) {
+                        this.omega_half[i][0] = 0;
+                    }
+
+                    // θ=π
+                    for (let i = 0; i < this.params.nr; i++) {
+                        const j = this.params.ntheta - 1;
+                        this.omega_half[i][j] = this.omega_half[i][0];
+                    }
+                }
+            }
+
+            /**
+             * 速度場の境界条件
+             */
+            applyVelocityBoundaryConditions() {
+                // 円柱表面（i=0）
+                for (let j = 0; j < this.params.ntheta; j++) {
+                    this.u[0][j] = 0;
+                    this.v[0][j] = 0;
+                }
+
+                // 外側境界（i=nr-1）
+                for (let j = 0; j < this.params.ntheta; j++) {
+                    this.u[this.params.nr-1][j] = this.params.U0 * Math.cos(this.theta[j]);
+                    this.v[this.params.nr-1][j] = -this.params.U0 * Math.sin(this.theta[j]);
+                }
+
+                // 対称軸（j=0, θ=0）
+                for (let i = 0; i < this.params.nr; i++) {
+                    this.u[i][0] = this.params.U0;
+                    this.v[i][0] = 0;
+                }
+
+                // θ=πでの境界条件
+                for (let i = 0; i < this.params.nr; i++) {
+                    const j = this.params.ntheta - 1;
+                    this.u[i][j] = -this.params.U0;
+                    this.v[i][j] = 0;
+                }
+
+                // 速度場の大きさを計算
+                this.calculateVelocityMagnitude();
+            }
+
+            /**
+             * 圧力場の境界条件
+             */
+            applyPressureBoundaryConditions() {
+                // 円柱表面での圧力勾配（ノイマン境界条件）
+                for (let j = 1; j < this.params.ntheta - 1; j++) {
+                    this.p[0][j] = this.p[1][j];
+                }
+
+                // 対称軸での圧力勾配
+                for (let i = 0; i < this.params.nr; i++) {
+                    this.p[i][0] = this.p[i][1];
+                    this.p[i][this.params.ntheta-1] = this.p[i][this.params.ntheta-2];
+                }
+
+                // 圧力の基準点（遠方で0）
+                this.p[this.params.nr-1][0] = 0;
+            }
+
+            /**
+             * 流れ関数の計算（SOR法）
+             */
+            solveStreamFunction() {
+                let error = 1.0;
+                let iter = 0;
+
+                // SOR法による反復計算
+                while (error > this.CONSTANTS.SOR_EPSILON && iter < this.CONSTANTS.MAX_SOR_ITER) {
+                    error = 0;
+
+                    for (let i = 1; i < this.params.nr - 1; i++) {
+                        for (let j = 1; j < this.params.ntheta - 1; j++) {
+                            // 格子間隔
+                            const dr_forward = this.r[i+1] - this.r[i];
+                            const dr_backward = this.r[i] - this.r[i-1];
+                            const dr = 0.5 * (dr_forward + dr_backward);
+
+                            const dtheta_forward = this.theta[j+1] - this.theta[j];
+                            const dtheta_backward = this.theta[j] - this.theta[j-1];
+                            const dtheta = 0.5 * (dtheta_forward + dtheta_backward);
+
+                            // 極座標系でのラプラシアン係数
+                            const A = 2 / (dr_forward * (dr_forward + dr_backward));
+                            const B = 2 / (dr_backward * (dr_forward + dr_backward));
+                            const C = 2 / (this.r[i] * this.r[i] * dtheta_forward * (dtheta_forward + dtheta_backward));
+                            const D = 2 / (this.r[i] * this.r[i] * dtheta_backward * (dtheta_forward + dtheta_backward));
+                            const E = -(A + B + C + D);
+
+                            // 流れ関数の更新（SOR法）
+                            const psi_new = (
+                                A * this.psi[i+1][j] + 
+                                B * this.psi[i-1][j] + 
+                                C * this.psi[i][j+1] + 
+                                D * this.psi[i][j-1] - 
+                                this.omega[i][j]
+                            ) / E;
+
+                            // 収束誤差の計算
+                            const local_error = Math.abs(psi_new - this.psi[i][j]);
+                            error = Math.max(error, local_error);
+
+                            // 流れ関数の更新（SOR法の緩和係数を適用）
+                            this.psi[i][j] = this.psi[i][j] + this.CONSTANTS.SOR_OMEGA * (psi_new - this.psi[i][j]);
+                        }
+                    }
+
+                    // 境界条件の適用
+                    this.applyStreamFunctionBoundaryConditions();
+
+                    iter++;
+                }
+            }
+
+            /**
+             * 三重対角行列を解くトーマスアルゴリズム
+             * @param {Array} a - 対角線の下の要素
+             * @param {Array} b - 対角線上の要素
+             * @param {Array} c - 対角線の上の要素
+             * @param {Array} d - 右辺ベクトル
+             * @param {Array} x - 解ベクトル（結果が格納される）
+             */
+            solveTridiagonal(a, b, c, d, x) {
+                const n = d.length;
+
+                // 前進消去
+                const cp = new Array(n).fill(0);
+                const dp = new Array(n).fill(0);
+
+                cp[0] = c[0] / b[0];
+                dp[0] = d[0] / b[0];
+
+                for (let i = 1; i < n; i++) {
+                    const m = 1.0 / (b[i] - a[i-1] * cp[i-1]);
+                    cp[i] = i < n - 1 ? c[i] * m : 0;
+                    dp[i] = (d[i] - a[i-1] * dp[i-1]) * m;
+                }
+
+                // 後退代入
+                x[n-1] = dp[n-1];
+
+                for (let i = n - 2; i >= 0; i--) {
+                    x[i] = dp[i] - cp[i] * x[i+1];
+                }
+            }
+
+            /**
+             * ADI法による渦度の更新（方向を指定）
+             * @param {number} nu - 動粘性係数
+             * @param {string} direction - 方向 ('r' または 'theta')
+             */
+            updateVorticityADI_Direction(nu, direction) {
+                const isRDirection = direction === 'r';
+                const outerLoopLimit = isRDirection ? this.params.ntheta : this.params.nr;
+                const innerLoopLimit = isRDirection ? this.params.nr : this.params.ntheta;
+
+                // 三重対角行列の係数と右辺ベクトル、解
+                const a = []; // 下対角
+                const b = []; // 対角
+                const c = []; // 上対角
+                const d = []; // 右辺
+                const x = []; // 解
+
+                // 現在の渦度を保存（r方向の場合のみ）
+                if (isRDirection) {
+                    for (let i = 0; i < this.params.nr; i++) {
+                        for (let j = 0; j < this.params.ntheta; j++) {
+                            this.omega_old[i][j] = this.omega[i][j];
+                        }
+                    }
+                }
+
+                // 方向に応じた計算
+                for (let outerIdx = 1; outerIdx < outerLoopLimit - 1; outerIdx++) {
+                    // 配列をクリア
+                    a.length = 0;
+                    b.length = 0;
+                    c.length = 0;
+                    d.length = 0;
+                    x.length = 0;
+
+                    for (let innerIdx = 1; innerIdx < innerLoopLimit - 1; innerIdx++) {
+                        // インデックスの設定（r方向かθ方向かに応じて）
+                        const i = isRDirection ? innerIdx : outerIdx;
+                        const j = isRDirection ? outerIdx : innerIdx;
+
+                        // 格子間隔
+                        const dr_forward = this.r[i+1] - this.r[i];
+                        const dr_backward = this.r[i] - this.r[i-1];
+                        const dr = 0.5 * (dr_forward + dr_backward);
+
+                        const dtheta_forward = this.theta[j+1] - this.theta[j];
+                        const dtheta_backward = this.theta[j] - this.theta[j-1];
+                        const dtheta = 0.5 * (dtheta_forward + dtheta_backward);
+
+                        // 速度成分（極座標系）
+                        const u_r = (this.psi[i][j+1] - this.psi[i][j-1]) / (this.r[i] * (this.theta[j+1] - this.theta[j-1]));
+                        const u_theta = -(this.psi[i+1][j] - this.psi[i-1][j]) / (this.r[i+1] - this.r[i-1]);
+
+                        if (isRDirection) {
+                            // r方向の拡散項の係数
+                            const alpha_r = nu * this.params.dt / (dr_forward * dr_backward);
+                            const beta_r = nu * this.params.dt / (this.r[i] * dr);
+
+                            // θ方向の拡散項（陽的に扱う）
+                            const d2omega_dtheta2 = (
+                                (this.omega_old[i][j+1] - this.omega_old[i][j]) / dtheta_forward - 
+                                (this.omega_old[i][j] - this.omega_old[i][j-1]) / dtheta_backward
+                            ) / (this.r[i] * this.r[i] * dtheta);
+
+                            // 移流項（陽的に扱う）
+                            const domega_dtheta = (this.omega_old[i][j+1] - this.omega_old[i][j-1]) / (this.theta[j+1] - this.theta[j-1]);
+                            const advection_theta = u_theta * domega_dtheta / this.r[i];
+
+                            // 三重対角行列の係数
+                            a.push(-alpha_r - beta_r * 0.5); // 下対角
+                            b.push(1.0 + 2.0 * alpha_r); // 対角
+                            c.push(-alpha_r + beta_r * 0.5); // 上対角
+
+                            // 右辺ベクトル
+                            d.push(this.omega_old[i][j] + 
+                                  nu * this.params.dt * d2omega_dtheta2 - 
+                                  this.params.dt * advection_theta);
+                        } else {
+                            // θ方向の拡散項の係数
+                            const alpha_theta = nu * this.params.dt / (this.r[i] * this.r[i] * dtheta_forward * dtheta_backward);
+
+                            // r方向の拡散項（陽的に扱う）
+                            const d2omega_dr2 = (
+                                (this.omega_half[i+1][j] - this.omega_half[i][j]) / dr_forward - 
+                                (this.omega_half[i][j] - this.omega_half[i-1][j]) / dr_backward
+                            ) / dr;
+
+                            const domega_dr = (this.omega_half[i+1][j] - this.omega_half[i-1][j]) / (this.r[i+1] - this.r[i-1]);
+
+                            // 移流項（陽的に扱う）
+                            const advection_r = u_r * domega_dr;
+
+                            // 三重対角行列の係数
+                            a.push(-alpha_theta); // 下対角
+                            b.push(1.0 + 2.0 * alpha_theta); // 対角
+                            c.push(-alpha_theta); // 上対角
+
+                            // 右辺ベクトル
+                            d.push(this.omega_half[i][j] + 
+                                  nu * this.params.dt * (d2omega_dr2 + domega_dr / this.r[i]) - 
+                                  this.params.dt * advection_r);
+                        }
+                    }
+
+                    // 境界条件の適用
+                    if (isRDirection) {
+                        // r方向の境界条件
+                        // 円柱表面 (i=1)
+                        b[0] += a[0];
+                        d[0] -= a[0] * this.omega[0][outerIdx];
+                        // a[0] は境界条件の適用後、不要になるので、以降は使用しない
+
+                        // 外側境界 (i=nr-2)
+                        const lastIdx = b.length - 1;
+                        b[lastIdx] += c[lastIdx];
+                        d[lastIdx] -= c[lastIdx] * this.omega[this.params.nr-1][outerIdx];
+                        // c[lastIdx] は境界条件の適用後、不要になるので、以降は使用しない
+
+                    } else {
+                        // θ方向の境界条件
+                        // θ=0 (j=1)
+                        b[0] += a[0];
+                        d[0] -= a[0] * this.omega_half[outerIdx][0];
+                        // a[0] は境界条件の適用後、不要になるので、以降は使用しない
+
+                        // θ=π (j=ntheta-2)
+                        const lastIdx = b.length - 1;
+                        b[lastIdx] += c[lastIdx];
+                        d[lastIdx] -= c[lastIdx] * this.omega_half[outerIdx][this.params.ntheta-1];
+                        // c[lastIdx] は境界条件の適用後、不要になるので、以降は使用しない
+                    }
+
+                    // 三重対角行列を解く
+                    for (let i = 0; i < d.length; i++) {
+                        x[i] = 0; // 解ベクトルの初期化
+                    }
+                    this.solveTridiagonal(a, b, c, d, x);
+
+                    // 解を渦度に格納
+                    for (let innerIdx = 1; innerIdx < innerLoopLimit - 1; innerIdx++) {
+                        const i = isRDirection ? innerIdx : outerIdx;
+                        const j = isRDirection ? outerIdx : innerIdx;
+
+                        if (isRDirection) {
+                            this.omega_half[i][j] = x[innerIdx - 1];
+                        } else {
+                            this.omega[i][j] = x[innerIdx - 1];
+                        }
+                    }
+                }
+
+                // 境界条件の適用
+                if (isRDirection) {
+                    // r方向後の中間ステップの境界条件（omega_halfに適用）
+                    for (let j = 0; j < this.params.ntheta; j++) {
+                        this.omega_half[0][j] = this.omega[0][j];  // 円柱表面
+                        this.omega_half[this.params.nr-1][j] = 0;   // 外側境界
+                    }
+
+                    for (let i = 0; i < this.params.nr; i++) {
+                        this.omega_half[i][0] = 0;               // θ=0
+                        this.omega_half[i][this.params.ntheta-1] = this.omega_half[i][0]; // θ=π, 対称性より
+                    }
+                } else {
+                    // θ方向後の最終的な境界条件（omegaに適用）
+                    this.applyVorticityBoundaryConditions();
+                }
+            }
+
+            /**
+             * ADI法による渦度の更新
+             * @returns {boolean} 計算が安定しているかどうか
+             */
+            updateVorticityADI() {
+                // 粘性係数（レイノルズ数から計算）
+                const nu = this.params.U0 * 2 * this.params.rMin / this.params.Re;
+
+                // r方向の陰解法
+                this.updateVorticityADI_Direction(nu, 'r');
+
+                // θ方向の陰解法
+                this.updateVorticityADI_Direction(nu, 'theta');
+
+                // NaNチェック
+                return this.checkNumericalStability();
+            }
+
+            /**
+             * 陽解法による渦度の更新
+             * @param {number} nu - 動粘性係数
+             * @returns {boolean} 計算が安定しているかどうか
+             */
+            updateVorticityExplicit(nu) {
+                // 現在の渦度を保存
+                for (let i = 0; i < this.params.nr; i++) {
+                    for (let j = 0; j < this.params.ntheta; j++) {
+                        this.omega_old[i][j] = this.omega[i][j];
+                    }
+                }
+
+                // 渦度輸送方程式の計算（陽解法）
+                for (let i = 1; i < this.params.nr - 1; i++) {
+                    for (let j = 1; j < this.params.ntheta - 1; j++) {
+                        // 格子間隔
+                        const dr_forward = this.r[i+1] - this.r[i];
+                        const dr_backward = this.r[i] - this.r[i-1];
+                        const dr = 0.5 * (dr_forward + dr_backward);
+
+                        const dtheta_forward = this.theta[j+1] - this.theta[j];
+                        const dtheta_backward = this.theta[j] - this.theta[j-1];
+                        const dtheta = 0.5 * (dtheta_forward + dtheta_backward);
+
+                        // 速度成分（極座標系）
+                        const u_r = (this.psi[i][j+1] - this.psi[i][j-1]) / (this.r[i] * (this.theta[j+1] - this.theta[j-1]));
+                        const u_theta = -(this.psi[i+1][j] - this.psi[i-1][j]) / (this.r[i+1] - this.r[i-1]);
+
+                        // 渦度の勾配（中心差分）
+                        const domega_dr = (this.omega_old[i+1][j] - this.omega_old[i-1][j]) / (this.r[i+1] - this.r[i-1]);
+                        const domega_dtheta = (this.omega_old[i][j+1] - this.omega_old[i][j-1]) / (this.theta[j+1] - this.theta[j-1]);
+
+                        // 渦度のラプラシアン（極座標系）
+                        const d2omega_dr2 = (
+                            (this.omega_old[i+1][j] - this.omega_old[i][j]) / dr_forward - 
+                            (this.omega_old[i][j] - this.omega_old[i-1][j]) / dr_backward
+                        ) / dr;
+
+                        const d2omega_dtheta2 = (
+                            (this.omega_old[i][j+1] - this.omega_old[i][j]) / dtheta_forward - 
+                            (this.omega_old[i][j] - this.omega_old[i][j-1]) / dtheta_backward
+                        ) / (this.r[i] * this.r[i] * dtheta);
+
+                        // 渦度輸送方程式（移流項 + 拡散項）
+                        const advection = u_r * domega_dr + u_theta * domega_dtheta / this.r[i];
+                        const diffusion = nu * (d2omega_dr2 + domega_dr/this.r[i] + d2omega_dtheta2);
+
+                        // 前進オイラー法による時間積分
+                        this.omega[i][j] = this.omega_old[i][j] + this.params.dt * (-advection + diffusion);
+                    }
+                }
+
+                // 境界条件の適用
+                this.applyVorticityBoundaryConditions();
+
+                // NaNチェック
+                return this.checkNumericalStability();
+            }
+
+            /**
+             * 数値的安定性のチェック
+             * @returns {boolean} 計算が安定しているかどうか
+             */
+            checkNumericalStability() {
+                for (let i = 0; i < this.params.nr; i++) {
+                    for (let j = 0; j < this.params.ntheta; j++) {
+                        if (isNaN(this.omega[i][j]) || !isFinite(this.omega[i][j])) {
+                            this.setStatus('error', 'エラー: 計算が不安定になりました。時間ステップを小さくしてください。');
+                            this.params.running = false;
+                            this.startBtn.textContent = '開始';
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+
+            /**
+             * 速度場の計算
+             */
+            calculateVelocityField() {
+                for (let i = 1; i < this.params.nr - 1; i++) {
+                    for (let j = 1; j < this.params.ntheta - 1; j++) {
+                        // 中心差分による速度計算
+                        const dtheta = this.theta[j+1] - this.theta[j-1];
+                        const dr = this.r[i+1] - this.r[i-1];
+
+                        // 極座標系での速度成分
+                        // u_r = (1/r) * (∂ψ/∂θ)
+                        // u_θ = -∂ψ/∂r
+                        const u_r = (this.psi[i][j+1] - this.psi[i][j-1]) / (this.r[i] * dtheta);
+                        const u_theta = -(this.psi[i+1][j] - this.psi[i-1][j]) / dr;
+
+                        // 直交座標系に変換
+                        this.u[i][j] = u_r * Math.cos(this.theta[j]) - u_theta * Math.sin(this.theta[j]);
+                        this.v[i][j] = u_r * Math.sin(this.theta[j]) + u_theta * Math.cos(this.theta[j]);
+                    }
+                }
+
+                // 境界での速度を設定
+                this.applyVelocityBoundaryConditions();
+            }
+
+            /**
+             * 速度場の大きさを計算
+             */
+            calculateVelocityMagnitude() {
+                for (let i = 0; i < this.params.nr; i++) {
+                    for (let j = 0; j < this.params.ntheta; j++) {
+                        this.velocityMagnitude[i][j] = Math.sqrt(this.u[i][j] * this.u[i][j] + this.v[i][j] * this.v[i][j]);
+                    }
+                }
+            }
+
+            /**
+             * 圧力場の計算（ポアソン方程式）
+             */
+            calculatePressureField() {
+                // 圧力のポアソン方程式を解く
+                let error = 1.0;
+                let iter = 0;
+
+                // SOR法による反復計算
+                while (error > this.CONSTANTS.SOR_EPSILON && iter < this.CONSTANTS.MAX_SOR_ITER) {
+                    error = 0;
+
+                    for (let i = 1; i < this.params.nr - 1; i++) {
+                        for (let j = 1; j < this.params.ntheta - 1; j++) {
+                            // 格子間隔
+                            const dr_forward = this.r[i+1] - this.r[i];
+                            const dr_backward = this.r[i] - this.r[i-1];
+                            const dr = 0.5 * (dr_forward + dr_backward);
+
+                            const dtheta_forward = this.theta[j+1] - this.theta[j];
+                            const dtheta_backward = this.theta[j] - this.theta[j-1];
+                            const dtheta = 0.5 * (dtheta_forward + dtheta_backward);
+
+                            // 速度勾配の計算
+                            const du_dx = (this.u[i+1][j] - this.u[i-1][j]) / (this.r[i+1] - this.r[i-1]);
+                            const dv_dy = (this.v[i][j+1] - this.v[i][j-1]) / (this.r[i] * (this.theta[j+1] - this.theta[j-1]));
+                            const du_dy = (this.u[i][j+1] - this.u[i][j-1]) / (this.r[i] * (this.theta[j+1] - this.theta[j-1]));
+                            const dv_dx = (this.v[i+1][j] - this.v[i-1][j]) / (this.r[i+1] - this.r[i-1]);
+
+                            // 圧力のラプラシアン係数
+                            const A = 2 / (dr_forward * (dr_forward + dr_backward));
+                            const B = 2 / (dr_backward * (dr_forward + dr_backward));
+                            const C = 2 / (this.r[i] * this.r[i] * dtheta_forward * (dtheta_forward + dtheta_backward));
+                            const D = 2 / (this.r[i] * this.r[i] * dtheta_backward * (dtheta_forward + dtheta_backward));
+                            const E = -(A + B + C + D);
+
+                            // 圧力の更新（SOR法）
+                            // 圧力ポアソン方程式の右辺（速度の発散の時間微分）
+                            const source = -this.params.U0 * this.params.U0 * (du_dx * du_dx + dv_dy * dv_dy + 2 * du_dy * dv_dx);
+
+                            const p_new = (
+                                A * this.p[i+1][j] + 
+                                B * this.p[i-1][j] + 
+                                C * this.p[i][j+1] + 
+                                D * this.p[i][j-1] - 
+                                source / this.params.Re
+                            ) / E;
+
+                            // 収束誤差の計算
+                            const local_error = Math.abs(p_new - this.p[i][j]);
+                            error = Math.max(error, local_error);
+
+                            // 圧力の更新（SOR法の緩和係数を適用）
+                            this.p[i][j] = this.p[i][j] + this.CONSTANTS.SOR_OMEGA * (p_new - this.p[i][j]);
+                        }
+                    }
+
+                    // 境界条件の適用
+                    this.applyPressureBoundaryConditions();
+
+                    iter++;
+                }
+            }
+
+            /**
+             * 表示範囲の更新
+             */
+            updateDisplayRanges() {
+                // 初期値の設定
+                let minPsi = Infinity;
+                let maxPsi = -Infinity;
+                let minOmega = Infinity;
+                let maxOmega = -Infinity;
+                let maxVelocity = 0;
+                let minP = Infinity;
+                let maxP = -Infinity;
+
+                // 最初のステップかどうかを確認
+                const firstStep = this.displayRanges.psi.min === null || this.params.steps < 5;
+
+                // 最初のステップまたはステップ数が少ない場合は全範囲を計算
+                if (firstStep) {
+                    // 各格子点での値を確認
+                    for (let i = 0; i < this.params.nr; i++) {
+                        for (let j = 0; j < this.params.ntheta; j++) {
+                            // 流れ関数
+                            if (!isNaN(this.psi[i][j]) && isFinite(this.psi[i][j])) {
+                                minPsi = Math.min(minPsi, this.psi[i][j]);
+                                maxPsi = Math.max(maxPsi, this.psi[i][j]);
+                            }
+
+                            // 渦度
+                            if (!isNaN(this.omega[i][j]) && isFinite(this.omega[i][j])) {
+                                minOmega = Math.min(minOmega, this.omega[i][j]);
+                                maxOmega = Math.max(maxOmega, this.omega[i][j]);
+                            }
+
+                            // 速度
+                            if (!isNaN(this.velocityMagnitude[i][j]) && isFinite(this.velocityMagnitude[i][j])) {
+                                maxVelocity = Math.max(maxVelocity, this.velocityMagnitude[i][j]);
+                            }
+
+                            // 圧力
+                            if (!isNaN(this.p[i][j]) && isFinite(this.p[i][j])) {
+                                minP = Math.min(minP, this.p[i][j]);
+                                maxP = Math.max(maxP, this.p[i][j]);
+                            }
+                        }
+                    }
+                } else {
+                    // 既存の範囲を使用
+                    minPsi = this.displayRanges.psi.min;
+                    maxPsi = this.displayRanges.psi.max;
+                    minOmega = this.displayRanges.omega.min;
+                    maxOmega = this.displayRanges.omega.max;
+                    maxVelocity = this.displayRanges.velocity.max;
+                    minP = this.displayRanges.pressure.min;
+                    maxP = this.displayRanges.pressure.max;
+
+                    // 現在の値で範囲を更新（ただし急激な変化を避けるため、緩やかに更新）
+                    for (let i = 0; i < this.params.nr; i++) {
+                        for (let j = 0; j < this.params.ntheta; j++) {
+                            // 流れ関数
+                            if (!isNaN(this.psi[i][j]) && isFinite(this.psi[i][j])) {
+                                minPsi = Math.min(minPsi, this.psi[i][j] * 0.9);
+                                maxPsi = Math.max(maxPsi, this.psi[i][j] * 1.1);
+                            }
+
+                            // 渦度
+                            if (!isNaN(this.omega[i][j]) && isFinite(this.omega[i][j])) {
+                                minOmega = Math.min(minOmega, this.omega[i][j] * 1.1);
+                                maxOmega = Math.max(maxOmega, this.omega[i][j] * 1.1);
+                            }
+
+                            // 速度
+                            if (!isNaN(this.velocityMagnitude[i][j]) && isFinite(this.velocityMagnitude[i][j])) {
+                                maxVelocity = Math.max(maxVelocity, this.velocityMagnitude[i][j] * 1.1);
+                            }
+
+                            // 圧力
+                            if (!isNaN(this.p[i][j]) && isFinite(this.p[i][j])) {
+                                minP = Math.min(minP, this.p[i][j] * 1.1);
+                                maxP = Math.max(maxP, this.p[i][j] * 1.1);
+                            }
+                        }
+                    }
+                }
+
+                // 渦度は対称にする
+                const absMaxOmega = Math.max(Math.abs(minOmega), Math.abs(maxOmega));
+                minOmega = -absMaxOmega;
+                maxOmega = absMaxOmega;
+
+                // 表示範囲が小さすぎる場合は調整（ゼロ除算防止）
+                const adjustRange = (min, max) => {
+                    if (Math.abs(max - min) < this.CONSTANTS.MIN_DISPLAY_RANGE) {
+                        return {
+                            min: min - this.CONSTANTS.MIN_DISPLAY_RANGE * 0.1,
+                            max: max + this.CONSTANTS.MIN_DISPLAY_RANGE * 0.1
+                        };
+                    }
+                    return { min, max };
+                };
+
+                // 表示範囲の更新
+                this.displayRanges.psi = adjustRange(minPsi, maxPsi);
+                this.displayRanges.omega = adjustRange(minOmega, maxOmega);
+                this.displayRanges.velocity = { min: 0, max: Math.max(maxVelocity, this.CONSTANTS.MIN_DISPLAY_RANGE) };
+                this.displayRanges.pressure = adjustRange(minP, maxP);
+
+                // デバッグ用
+                if (this.params.steps % 10 === 0) {
+                    console.log(`表示範囲更新: psi[${this.displayRanges.psi.min.toFixed(3)}, ${this.displayRanges.psi.max.toFixed(3)}], omega[${this.displayRanges.omega.min.toFixed(3)}, ${this.displayRanges.omega.max.toFixed(3)}]`);
+                }
+            }
+
+            /**
+             * シミュレーションの1ステップ
+             * @returns {boolean} 計算が安定しているかどうか
+             */
+            simulationStep() {
+                // 流れ関数の計算
+                this.solveStreamFunction();
+
+                // 速度場の計算
+                this.calculateVelocityField();
+
+                // 渦度の更新（選択された解法に基づく）
+                let success;
+                if (this.params.solverMethod === 'adi') {
+                    // 粘性係数（レイノルズ数から計算）
+                    const nu = this.params.U0 * 2 * this.params.rMin / this.params.Re;
+                    success = this.updateVorticityADI();
+                } else {
+                    // 粘性係数（レイノルズ数から計算）
+                    const nu = this.params.U0 * 2 * this.params.rMin / this.params.Re;
+                    success = this.updateVorticityExplicit(nu);
+                }
+
+                // 圧力場の計算
+                this.calculatePressureField();
+
+                // 時間と計算ステップの更新
+                this.params.time += this.params.dt;
+                this.params.steps++;
+
+                // 表示範囲の更新
+                this.updateDisplayRanges();
+
+                // デバッグ用
+                if (this.params.steps % 10 === 0) {
+                    console.log(`ステップ ${this.params.steps}, 時間 ${this.params.time.toFixed(3)}s`);
+                }
+
+                return success;
+            }
+
+            /**
+             * 表示の更新
+             */
+            updateDisplay() {
+                // 時間と計算ステップの表示更新
+                this.timeDisplay.textContent = this.params.time.toFixed(2);
+                this.stepDisplay.textContent = this.params.steps;
+
+                // シミュレーション結果の描画
+                this.drawSimulation();
+            }
+
+            /**
+             * キャンバスへの描画
+             */
+            drawSimulation() {
+                // キャンバスのクリア
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // 座標変換のパラメータ,
+                // (x,y) = (0, 0)がキャンバス中心よりやや下に来るようにオフセット
+                const scale = this.canvas.width / (2.2 * this.params.rMax);  // スケールはrMaxで調整
+                const offsetX = this.canvas.width / 2;         // x方向のオフセットはキャンバス幅の半分
+                const offsetY = this.canvas.height * 0.8;    // y方向のオフセットを調整
+
+                // シミュレーション領域の描画
+                this.drawSimulationDomain(scale, offsetX, offsetY);
+
+                // 円柱の描画
+                this.drawCylinder(scale, offsetX, offsetY);
+
+                // 座標軸の描画
+                this.drawCoordinateAxes(scale, offsetX, offsetY);
+
+                // カラーマップの凡例を描画
+                this.updateLegend();
+            }
+
+            /**
+             * シミュレーション領域の描画
+             */
+            drawSimulationDomain(scale, offsetX, offsetY) {
+                // セルの描画
+                for (let i = 0; i < this.params.nr - 1; i++) {
+                    for (let j = 0; j < this.params.ntheta - 1; j++) {
+                        // 各モードの描画
+                        if (this.params.displayMode === 'velocity') {
+                            this.drawCell(i, j, scale, offsetX, offsetY, this.velocityMagnitude, 'viridis', { min: 0, max: this.displayRanges.velocity.max });
+                        } else if (this.params.displayMode === 'streamlines') {
+                            this.drawCell(i, j, scale, offsetX, offsetY, this.psi, 'viridis', this.displayRanges.psi);
+                        } else if (this.params.displayMode === 'vorticity') {
+                            this.drawCell(i, j, scale, offsetX, offsetY, this.omega, 'RdBu', this.displayRanges.omega);
+                        } else {
+                            this.drawCell(i, j, scale, offsetX, offsetY, this.p, 'plasma', this.displayRanges.pressure);
+                        }
+                    }
+                }
+
+                // 流線
+                if (this.params.displayMode === 'streamlines') {
+                    this.drawStreamlines(scale, offsetX, offsetY);
+                }
+
+                // 速度ベクトル
+                if (this.params.displayMode === 'velocity') {
+                    this.drawVelocityVectors(scale, offsetX, offsetY);
+                }
+            }
+
+            /**
+             * 流線の描画
+             */
+            drawStreamlines(scale, offsetX, offsetY) {
+                const { min: minPsi, max: maxPsi } = this.displayRanges.psi;
+                const numLines = this.CONSTANTS.STREAMLINE_COUNT;
+                const psiStep = (maxPsi - minPsi) / numLines;
+
+                for (let psiVal = minPsi + psiStep; psiVal < maxPsi; psiVal += psiStep) {
+                    this.ctx.beginPath();
+                    let started = false;
+
+                    // 各セルを調査
+                    for (let i = 0; i < this.params.nr - 1; i++) {
+                        for (let j = 0; j < this.params.ntheta - 1; j++) {
+                            // 4つの格子点の流れ関数値
+                            const psi1 = this.psi[i][j];
+                            const psi2 = this.psi[i+1][j];
+                            const psi3 = this.psi[i+1][j+1];
+                            const psi4 = this.psi[i][j+1];
+
+                            // マーチングスクエアアルゴリズムで流線を描画
+                            const points = [];
+
+                            // 辺1: (i,j) -> (i+1,j)
+                            if ((psi1 - psiVal) * (psi2 - psiVal) <= 0 && psi1 !== psi2) {
+                                const t = (psiVal - psi1) / (psi2 - psi1);
+                                const x = this.r[i] + t * (this.r[i+1] - this.r[i]);
+                                const y = this.theta[j];
+                                points.push({x, y});
+                            }
+
+                            // 辺2: (i+1,j) -> (i+1,j+1)
+                            if ((psi2 - psiVal) * (psi3 - psiVal) <= 0 && psi2 !== psi3) {
+                                const t = (psiVal - psi2) / (psi3 - psi2);
+                                const x = this.r[i+1];
+                                const y = this.theta[j] + t * (this.theta[j+1] - this.theta[j]);
+                                points.push({x, y});
+                            }
+
+                            // 辺3: (i+1,j+1) -> (i,j+1)
+                            if ((psi3 - psiVal) * (psi4 - psiVal) <= 0 && psi3 !== psi4) {
+                                const t = (psiVal - psi3) / (psi4 - psi3);
+                                const x = this.r[i+1] + t * (this.r[i] - this.r[i+1]);
+                                const y = this.theta[j+1];
+                                points.push({x, y});
+                            }
+
+                            // 辺4: (i,j+1) -> (i,j)
+                            if ((psi4 - psiVal) * (psi1 - psiVal) <= 0 && psi4 !== psi1) {
+                                const t = (psiVal - psi4) / (psi1 - psi4);
+                                const x = this.r[i];
+                                const y = this.theta[j+1] + t * (this.theta[j] - this.theta[j+1]);
+                                points.push({x, y});
+                            }
+
+                            // 交点が2つある場合、線分を描画
+                            if (points.length === 2) {
+                                // 極座標から直交座標に変換
+                                let p1 = this.polarToCartesian(points[0].x, points[0].y);
+                                let p2 = this.polarToCartesian(points[1].x, points[1].y);
+
+                                // キャンバス座標に変換
+                                const c1 = this.toCanvasCoordinates(p1.x, p1.y, scale, offsetX, offsetY);
+                                const c2 = this.toCanvasCoordinates(p2.x, p2.y, scale, offsetX, offsetY);
+
+                                // 線分を描画
+                                if (!started) {
+                                    this.ctx.moveTo(c1.x, c1.y);
+                                    started = true;
+                                } else {
+                                    this.ctx.lineTo(c1.x, c1.y);
+                                }
+                                this.ctx.lineTo(c2.x, c2.y);
+                            }
+                        }
+                    }
+
+                    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                    this.ctx.lineWidth = 1;
+                    this.ctx.stroke();
+                }
+            }
+
+            /**
+             * 速度ベクトルの描画
+             */
+            drawVelocityVectors(scale, offsetX, offsetY) {
+                const { max: maxVelocity } = this.displayRanges.velocity;
+                // 速度ベクトルを描画する間隔
+                const skipFactor = Math.max(1, Math.floor(this.params.nr / this.CONSTANTS.VECTOR_SKIP_FACTOR));
+
+                // 速度ベクトルの描画
+                for (let i = 0; i < this.params.nr; i += skipFactor) {
+                    for (let j = 0; j < this.params.ntheta; j += skipFactor) {
+                        // 極座標から直交座標に変換
+                        const p = this.polarToCartesian(this.r[i], this.theta[j]);
+
+                        // 速度ベクトルの大きさ
+                        const vel = this.velocityMagnitude[i][j];
+
+                        // 速度ベクトルの描画
+                        const arrowLength = 0.3 * skipFactor;
+
+                        const c = this.toCanvasCoordinates(p.x, p.y, scale, offsetX, offsetY);
+                        const endX = c.x + this.u[i][j] / maxVelocity * arrowLength * scale * this.CONSTANTS.ARROW_LENGTH_SCALE;
+                        const endY = c.y - this.v[i][j] / maxVelocity * arrowLength * scale * this.CONSTANTS.ARROW_LENGTH_SCALE;
+
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(c.x, c.y);
+                        this.ctx.lineTo(endX, endY);
+                        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                        this.ctx.lineWidth = 1;
+                        this.ctx.stroke();
+
+                        // 矢印の先端を描画
+                        const angle = Math.atan2(c.y - endY, endX - c.x);
+                        const arrowSize = this.CONSTANTS.ARROW_SIZE;
+
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(endX, endY);
+                        this.ctx.lineTo(
+                            endX - arrowSize * Math.cos(angle - Math.PI / 6),
+                            endY + arrowSize * Math.sin(angle - Math.PI / 6)
+                        );
+                        this.ctx.lineTo(
+                            endX - arrowSize * Math.cos(angle + Math.PI / 6),
+                            endY + arrowSize * Math.sin(angle + Math.PI / 6)
+                        );
+                        this.ctx.closePath();
+                        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+                        this.ctx.fill();
+                    }
+                }
+            }
+
+            /**
+             * 円柱の描画
+             */
+            drawCylinder(scale, offsetX, offsetY) {
+                this.ctx.beginPath();
+                this.ctx.arc(offsetX, offsetY, this.params.rMin * scale, 0, 2 * Math.PI);
+                this.ctx.fillStyle = '#888';
+                this.ctx.fill();
+                this.ctx.strokeStyle = '#000';
+                this.ctx.stroke();
+            }
+
+            /**
+             * 極座標から直交座標への変換
+             */
+            polarToCartesian(r, theta) {
+                return {
+                    x: r * Math.cos(theta),
+                    y: r * Math.sin(theta)
+                };
+            }
+
+            /**
+             * キャンバス座標への変換
+             */
+            toCanvasCoordinates(x, y, scale, offsetX, offsetY) {
+                return {
+                    x: offsetX + x * scale,
+                    y: offsetY - y * scale
+                };
+            }
+
+            /**
+             * セルの描画（共通処理）
+             */
+            drawCell(i, j, scale, offsetX, offsetY, field, colormap, range) {
+                // セルの4つの頂点の座標（極座標）
+                const r1 = this.r[i];
+                const r2 = this.r[i+1];
+                const theta1 = this.theta[j];
+                const theta2 = this.theta[j+1];
+
+                // 直交座標に変換
+                const p1 = this.polarToCartesian(r1, theta1);
+                const p2 = this.polarToCartesian(r2, theta1);
+                const p3 = this.polarToCartesian(r2, theta2);
+                const p4 = this.polarToCartesian(r1, theta2);
+
+                // キャンバス座標に変換
+                const c1 = this.toCanvasCoordinates(p1.x, p1.y, scale, offsetX, offsetY);
+                const c2 = this.toCanvasCoordinates(p2.x, p2.y, scale, offsetX, offsetY);
+                const c3 = this.toCanvasCoordinates(p3.x, p3.y, scale, offsetX, offsetY);
+                const c4 = this.toCanvasCoordinates(p4.x, p4.y, scale, offsetX, offsetY);
+
+                // セルの中心の値
+                const val = 0.25 * (field[i][j] + field[i+1][j] + field[i+1][j+1] + field[i][j+1]);
+
+                // 値に応じた色を設定
+                const normalizedVal = (val - range.min) / (range.max - range.min);
+                const color = this.getColorForValue(normalizedVal, colormap);
+
+                // セルを描画
+                this.ctx.beginPath();
+                this.ctx.moveTo(c1.x, c1.y);
+                this.ctx.lineTo(c2.x, c2.y);
+                this.ctx.lineTo(c3.x, c3.y);
+                this.ctx.lineTo(c4.x, c4.y);
+                this.ctx.closePath();
+                this.ctx.fillStyle = color;
+                this.ctx.fill();
+            }
+
+            /**
+             * 座標軸の描画
+             */
+            drawCoordinateAxes(scale, offsetX, offsetY) {
+                // x軸
+                this.ctx.beginPath();
+                this.ctx.moveTo(offsetX - this.params.rMax * scale, offsetY);
+                this.ctx.lineTo(offsetX + this.params.rMax * scale, offsetY);
+                this.ctx.strokeStyle = '#000';
+                this.ctx.lineWidth = 1;
+                this.ctx.stroke();
+
+                // y軸
+                this.ctx.beginPath();
+                this.ctx.moveTo(offsetX, offsetY + this.params.rMax * scale);
+                this.ctx.lineTo(offsetX, offsetY - this.params.rMax * scale);
+                this.ctx.stroke();
+
+                // 軸ラベル
+                this.ctx.fillStyle = '#000';
+                this.ctx.font = this.CONSTANTS.AXIS_LABEL_FONT;
+                this.ctx.fillText('x-coordinate [m]', offsetX + this.params.rMax * scale - 120, offsetY + 20);
+                this.ctx.fillText('y-coordinate [m]', offsetX - 120, offsetY - this.params.rMax * scale + 20);
+            }
+
+            /**
+             * カラーマップの凡例の更新
+             */
+            updateLegend() {
+                const gradient = this.legendCtx.createLinearGradient(0, 0, this.legendCanvas.width, 0);
+
+                // 表示モードに応じたカラーマップを選択
+                let colormap;
+                let legendLabel;
+
+                switch (this.params.displayMode) {
+                    case 'vorticity':
+                        colormap = 'RdBu';
+                        legendLabel = '渦度 [1/s]';
+                        break;
+                    case 'velocity':
+                        colormap = 'viridis';
+                        legendLabel = '速度 [m/s]';
+                        break;
+                    case 'pressure':
+                        colormap = 'plasma';
+                        legendLabel = '圧力 [Pa]';
+                        break;
+                    default:
+                        colormap = 'viridis';
+                        legendLabel = '流れ関数 [m²/s]';
+                }
+
+                // グラデーションの設定
+                for (let i = 0; i <= 10; i++) {
+                    const value = i / 10;
+                    gradient.addColorStop(value, this.getColorForValue(value, colormap));
+                }
+
+                // 凡例の描画
+                this.legendCtx.clearRect(0, 0, this.legendCanvas.width, this.legendCanvas.height);
+                this.legendCtx.fillStyle = gradient;
+                this.legendCtx.fillRect(0, 0, this.legendCanvas.width, this.legendCanvas.height);
+
+                // 凡例の枠
+                this.legendCtx.strokeStyle = '#000';
+                this.legendCtx.lineWidth = 1;
+                this.legendCtx.strokeRect(0, 0, this.legendCanvas.width, this.legendCanvas.height);
+
+                // 凡例のラベル更新
+                this.legendLabel.textContent = legendLabel;
+
+                // 凡例の最小値と最大値を表示
+                this.legendCtx.fillStyle = '#000';
+                this.legendCtx.font = '12px Arial';
+
+                let minVal, maxVal;
+
+                switch (this.params.displayMode) {
+                    case 'vorticity':
+                        minVal = this.displayRanges.omega.min.toFixed(2);
+                        maxVal = this.displayRanges.omega.max.toFixed(2);
+                        break;
+                    case 'velocity':
+                        minVal = this.displayRanges.velocity.min.toFixed(2);
+                        maxVal = this.displayRanges.velocity.max.toFixed(2);
+                        break;
+                    case 'pressure':
+                        minVal = this.displayRanges.pressure.min.toFixed(2);
+                        maxVal = this.displayRanges.pressure.max.toFixed(2);
+                        break;
+                    default:
+                        minVal = this.displayRanges.psi.min.toFixed(2);
+                        maxVal = this.displayRanges.psi.max.toFixed(2);
+                }
+
+                this.legendCtx.fillText(minVal, 2, 12);
+                this.legendCtx.fillText(maxVal, this.legendCanvas.width - 30, 12);
+            }
+
+            /**
+             * 値に応じた色を返す関数
+             * @param {number} value - 0～1の範囲の正規化された値
+             * @param {string} colormap - カラーマップの種類 ('RdBu', 'viridis', 'plasma')
+             * @returns {string} RGB色文字列
+             */
+            getColorForValue(value, colormap) {
+                // 値を0～1の範囲に制限
+                value = Math.max(0, Math.min(1, value));
+
+                let r, g, b;
+
+                switch (colormap) {
+                    case 'RdBu': // 赤青カラーマップ（渦度用）
+                        if (value < 0.5) {
+                            // 青から白へ
+                            const v = value * 2;
+                            r = Math.round(v * 255);
+                            g = Math.round(v * 255);
+                            b = 255;
+                        } else {
+                            // 白から赤へ
+                            const v = (value - 0.5) * 2;
+                            r = 255;
+                            g = Math.round((1 - v) * 255);
+                            b = Math.round((1 - v) * 255);
+                        }
+                        break;
+
+                    case 'viridis': // viridisカラーマップ（速度場用）
+                        if (value < 0.25) {
+                            const v = value * 4;
+                            r = Math.round(68 * (1 - v) + 33 * v);
+                            g = Math.round(1 * (1 - v) + 145 * v);
+                            b = Math.round(84 * (1 - v) + 140 * v);
+                        } else if (value < 0.5) {
+                            const v = (value - 0.25) * 4;
+                            r = Math.round(33 * (1 - v) + 38 * v);
+                            g = Math.round(145 * (1 - v) + 188 * v);
+                            b = Math.round(140 * (1 - v) + 189 * v);
+                        } else if (value < 0.75) {
+                            const v = (value - 0.5) * 4;
+                            r = Math.round(38 * (1 - v) + 122 * v);
+                            g = Math.round(188 * (1 - v) + 206 * v);
+                            b = Math.round(189 * (1 - v) + 167 * v);
+                        } else {
+                            const v = (value - 0.75) * 4;
+                            r = Math.round(122 * (1 - v) + 253 * v);
+                            g = Math.round(206 * (1 - v) + 231 * v);
+                            b = Math.round(167 * (1 - v) + 37 * v);
+                        }
+                        break;
+
+                    case 'plasma': // plasmaカラーマップ（圧力場用）
+                        if (value < 0.25) {
+                            const v = value * 4;
+                            r = Math.round(13 * (1 - v) + 126 * v);
+                            g = Math.round(8 * (1 - v) + 3 * v);
+                            b = Math.round(135 * (1 - v) + 164 * v);
+                        } else if (value < 0.5) {
+                            const v = (value - 0.25) * 4;
+                            r = Math.round(126 * (1 - v) + 203 * v);
+                            g = Math.round(3 * (1 - v) + 71 * v);
+                            b = Math.round(164 * (1 - v) + 148 * v);
+                        } else if (value < 0.75) {
+                            const v = (value - 0.5) * 4;
+                            r = Math.round(203 * (1 - v) + 248 * v);
+                            g = Math.round(71 * (1 - v) + 149 * v);
+                            b = Math.round(148 * (1 - v) + 64 * v);
+                        } else {
+                            const v = (value - 0.75) * 4;
+                            r = Math.round(248 * (1 - v) + 240 * v);
+                            g = Math.round(149 * (1 - v) + 249 * v);
+                            b = Math.round(64 * (1 - v) + 33 * v);
+                        }
+                        break;
+
+                    default: // デフォルトはグレースケール
+                        r = g = b = Math.round(value * 255);
+                }
+
+                return `rgb(${r}, ${g}, ${b})`;
+            }
+
+            /**
+             * アニメーションループ
+             * @param {number} timestamp - 現在のタイムスタンプ
+             */
+            animate(timestamp) {
+                // フレームレート制御（60fpsを目標）
+                const frameInterval = 1000 / 60; // 16.7ms（約60fps）
+                const elapsed = timestamp - this.params.lastFrameTime;
+
+                if (this.params.running && elapsed > frameInterval) {
+                    this.params.lastFrameTime = timestamp;
+
+                    // シミュレーションステップの実行
+                    const success = this.simulationStep();
+
+                    // 計算が成功した場合のみ表示を更新
+                    if (success) {
+                        this.updateDisplay();
+                    }
+                }
+
+                // 次のフレームをリクエスト
+                requestAnimationFrame(this.animate.bind(this));
+            }
+
+            /**
+             * シミュレーションの初期化
+             */
+            initializeSimulation() {
+                this.params.Re = parseInt(this.reynoldsInput.value);
+                this.params.dt = parseFloat(this.dtInput.value);
+                this.params.displayMode = this.displayModeSelect.value;
+                this.params.solverMethod = this.solverMethodSelect.value;
+                this.params.time = 0;
+                this.params.steps = 0;
+
+                this.initializeGrid();
+                this.setInitialConditions();
+
+                this.timeDisplay.textContent = this.params.time.toFixed(2);
+                this.stepDisplay.textContent = this.params.steps;
+
+                // 解法に応じた説明を表示
+                if (this.params.solverMethod === 'adi') {
+                    this.solverInfo.textContent = 'ADI法: より大きな時間ステップでも安定した解が得られます';
+                } else {
+                    this.solverInfo.textContent = '陽解法: 計算は速いですが、時間ステップを小さくする必要があります';
+                }
+
+                this.checkStability();
+                this.updateDisplay();
+
+                this.setStatus('stable', 'シミュレーション準備完了');
+            }
+        }
+
+        // シミュレーションの開始
+        document.addEventListener('DOMContentLoaded', () => {
+            const simulation = new CylinderFlowSimulation();
+        });
+    </script>
+</body>
+</html>
